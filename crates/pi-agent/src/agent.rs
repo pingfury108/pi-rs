@@ -26,6 +26,18 @@ pub struct Agent {
     event_tx: broadcast::Sender<AgentEvent>,
     is_streaming: AtomicBool,
     cancel: Mutex<Option<CancellationToken>>,
+    hooks: Mutex<Option<LoopHooks>>,
+}
+
+/// Tool hooks installed on an agent (bridged into the loop config per run).
+#[derive(Default, Clone)]
+pub struct LoopHooks {
+    pub before_tool_call: Option<
+        Arc<dyn Fn(crate::types::BeforeToolCallContext<'_>) -> BoxFuture<Option<crate::types::BeforeToolCallResult>> + Send + Sync>,
+    >,
+    pub after_tool_call: Option<
+        Arc<dyn Fn(crate::types::AfterToolCallContext<'_>) -> BoxFuture<Option<crate::types::AfterToolCallResult>> + Send + Sync>,
+    >,
 }
 
 struct StateInner {
@@ -99,6 +111,7 @@ impl AgentBuilder {
             event_tx,
             is_streaming: AtomicBool::new(false),
             cancel: Mutex::new(None),
+            hooks: Mutex::new(None),
         }
     }
 }
@@ -160,6 +173,11 @@ impl Agent {
         self.follow_up.lock().unwrap().push_back(message);
     }
 
+
+    /// Install tool hooks (bridged into every subsequent run).
+    pub fn set_hooks(&self, hooks: LoopHooks) {
+        *self.hooks.lock().unwrap() = Some(hooks);
+    }
 
     /// Abort the current run.
     pub fn abort(&self) {
@@ -233,6 +251,10 @@ impl Agent {
         model: pi_ai::types::Model,
         thinking_level: ThinkingLevel,
     ) -> AgentLoopConfig {
+        // NOTE: clone hooks first — two `self.hooks.lock()` calls inside one
+        // struct expression would deadlock (temporary guard lives to the end
+        // of the expression).
+        let hooks = self.hooks.lock().unwrap().clone();
         let get_steering: MessageQueueFn = {
             let deque = self.steering.clone();
             Arc::new(move || {
@@ -263,8 +285,8 @@ impl Agent {
             should_stop_after_turn: None,
             prepare_next_turn: None,
             tool_execution: self.tool_execution,
-            before_tool_call: None,
-            after_tool_call: None,
+            before_tool_call: hooks.as_ref().and_then(|h| h.before_tool_call.clone()),
+            after_tool_call: hooks.as_ref().and_then(|h| h.after_tool_call.clone()),
         }
     }
 }

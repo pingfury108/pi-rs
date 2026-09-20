@@ -23,6 +23,7 @@ uuid = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true, features = ["blocking"] }
 globset = "0.4"
+rhai = { version = "1", features = ["sync"] }
 
 [lints]
 workspace = true

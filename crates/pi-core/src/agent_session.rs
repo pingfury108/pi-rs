@@ -5,6 +5,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use crate::extensions::ExtensionHost;
+
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -43,6 +45,7 @@ pub struct AgentSession {
     model: Mutex<Model>,
     compaction_enabled: bool,
     cancel: CancellationToken,
+    extensions: Arc<ExtensionHost>,
 }
 
 impl AgentSession {
@@ -84,6 +87,14 @@ impl AgentSession {
             .system_prompt(system_prompt)
             .build();
 
+        // Load extensions (scripts) and register their tools + hooks.
+        let extension_host = Arc::new(ExtensionHost::load(&options.cwd));
+        for tool in extension_host.build_tools() {
+            agent.add_tool(tool);
+        }
+        install_extension_hooks(&agent, &extension_host);
+        spawn_event_forwarder(&agent, extension_host.clone());
+
         // Register tools.
         for tool in tool_set(&options.cwd) {
             agent.add_tool(tool);
@@ -110,6 +121,7 @@ impl AgentSession {
             model: Mutex::new(options.model.clone()),
             compaction_enabled: options.compaction_enabled,
             cancel: CancellationToken::new(),
+            extensions: extension_host,
         }))
     }
 
@@ -133,6 +145,10 @@ impl AgentSession {
     pub fn abort(&self) {
         self.cancel.cancel();
         self.agent.abort();
+    }
+
+    pub fn extensions(&self) -> &ExtensionHost {
+        &self.extensions
     }
 
     /// Send a user prompt: persists the message, runs the agent loop with
@@ -522,6 +538,86 @@ impl AgentSession {
         }
         None
     }
+}
+
+/// Wire extension before/after tool hooks into the agent's loop config.
+fn install_extension_hooks(agent: &Agent, host: &Arc<ExtensionHost>) {
+    if host.is_empty() {
+        return;
+    }
+    let before_host = host.clone();
+    let after_host = host.clone();
+    agent.set_hooks(pi_agent::LoopHooks {
+        before_tool_call: Some(Arc::new(move |ctx: pi_agent::BeforeToolCallContext<'_>| {
+            let host = before_host.clone();
+            let tool_name = ctx.tool_call.name.clone();
+            let args_json =
+                serde_json::to_string(&ctx.args).unwrap_or_else(|_| "{}".into());
+            Box::pin(async move {
+                host.before_tool_call(&tool_name, &args_json).map(|reason| {
+                    pi_agent::BeforeToolCallResult {
+                        block: true,
+                        reason: Some(reason),
+                        terminate: false,
+                    }
+                })
+            })
+        })),
+        after_tool_call: Some(Arc::new(move |ctx: pi_agent::AfterToolCallContext<'_>| {
+            let host = after_host.clone();
+            let tool_name = ctx.tool_call.name.clone();
+            let result_text = pi_agent::content_text(
+                &ctx.result
+                    .content
+                    .iter()
+                    .map(|c| match c {
+                        pi_ai::types::ToolResultContent::Text(t) => {
+                            pi_ai::types::ToolResultContent::Text(t.clone())
+                        }
+                        pi_ai::types::ToolResultContent::Image(i) => {
+                            pi_ai::types::ToolResultContent::Image(i.clone())
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            Box::pin(async move {
+                host.after_tool_call(&tool_name, &result_text)
+                    .map(|text| pi_agent::AfterToolCallResult {
+                        content: Some(vec![pi_ai::types::ToolResultContent::Text(
+                            pi_ai::types::TextContent {
+                                text,
+                                text_signature: None,
+                            },
+                        )]),
+                        ..Default::default()
+                    })
+            })
+        })),
+    });
+}
+
+/// Forward agent events to extensions (`on_event`).
+fn spawn_event_forwarder(agent: &Agent, host: Arc<ExtensionHost>) {
+    if host.is_empty() {
+        return;
+    }
+    let mut events = agent.subscribe();
+    tokio::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(event) => {
+                    if let Ok(json) = serde_json::to_string(&event) {
+                        host.emit_event(&json);
+                    }
+                    if matches!(event, AgentEvent::AgentEnd { .. }) {
+                        // keep listening for subsequent runs
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
 }
 
 fn sessions_dir(cwd: &Path) -> PathBuf {

@@ -1,6 +1,7 @@
 //! pi-core: AgentSession — lifecycle, system prompt, compaction, retry.
 
 pub mod agent_session;
+pub mod extensions;
 pub mod model_catalog;
 pub mod model_registry;
 pub mod prompt_templates;
@@ -9,6 +10,7 @@ pub mod skills;
 pub mod system_prompt;
 
 pub use agent_session::{AgentSession, SessionOptions, SUMMARIZATION_SYSTEM_PROMPT};
+pub use extensions::ExtensionHost;
 pub use model_registry::{
     build_api, build_model, provider_defaults, resolve_api_key, PROVIDERS,
 };
