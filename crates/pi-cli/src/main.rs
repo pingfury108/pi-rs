@@ -1,6 +1,7 @@
 //! pi-cli: Headless coding agent CLI (print / json / repl modes).
 
 mod repl;
+mod rpc;
 
 use std::io::Write as _;
 use std::path::PathBuf;
@@ -65,6 +66,10 @@ struct Cli {
     /// Enter interactive REPL mode (default when no prompt is given on a TTY).
     #[arg(long, default_value_t = false)]
     repl: bool,
+
+    /// Serve the JSONL RPC protocol on stdin/stdout.
+    #[arg(long, default_value_t = false)]
+    rpc: bool,
 
     /// List saved sessions and exit.
     #[arg(long, default_value_t = false)]
@@ -165,6 +170,10 @@ async fn main() -> anyhow::Result<()> {
     if cli.print_session {
         println!("{}", session.session_file().display());
         return Ok(());
+    }
+
+    if cli.rpc {
+        return Box::pin(rpc::run_rpc(session)).await;
     }
 
     if cli.repl {

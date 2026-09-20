@@ -1,0 +1,2 @@
+{"id":"1","type":"get_state"}
+{"id":"2","type":"prompt","message":"Read /tmp/pi-rs-rpc/rpc-note.txt and reply with only its content."}

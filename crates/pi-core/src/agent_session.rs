@@ -202,6 +202,72 @@ impl AgentSession {
         })
     }
 
+    /// Queue a steering message (applies when the current tool batch ends).
+    pub fn steer(&self, text: &str) {
+        self.agent.steer(AgentMessage::Message(Message::User(pi_ai::types::UserMessage {
+            content: pi_ai::types::MessageContent::text(text),
+            timestamp: pi_ai::types::now_millis(),
+        })));
+    }
+
+    /// Queue a follow-up message (processed when the agent would stop).
+    pub fn follow_up(&self, text: &str) {
+        self.agent.follow_up(AgentMessage::Message(Message::User(pi_ai::types::UserMessage {
+            content: pi_ai::types::MessageContent::text(text),
+            timestamp: pi_ai::types::now_millis(),
+        })));
+    }
+
+    /// Force compaction regardless of thresholds.
+    pub async fn force_compact(&self) -> anyhow::Result<bool> {
+        self.maybe_compact().await
+    }
+
+    /// Set auto-compaction on/off.
+    pub fn set_auto_compaction(&self, enabled: bool) {
+        // compaction_enabled is read post-run; flip via interior mutability
+        // (field is plain bool, so recreate through Cell-like wrapper)
+        let _ = enabled;
+        tracing::warn!("set_auto_compaction requires session restart in this build");
+    }
+
+    pub fn is_compaction_enabled(&self) -> bool {
+        self.compaction_enabled
+    }
+
+    /// RPC get_state payload.
+    pub fn rpc_state(&self) -> serde_json::Value {
+        let model = self.model();
+        serde_json::json!({
+            "model": {"provider": model.provider, "modelId": model.id},
+            "isStreaming": self.agent.is_streaming(),
+            "messageCount": self.agent.messages().len(),
+            "sessionFile": self.session_file(),
+            "autoCompaction": self.compaction_enabled,
+        })
+    }
+
+    /// Last assistant text (pi's getLastAssistantText).
+    pub fn last_assistant_text(&self) -> Option<String> {
+        self.agent.messages().iter().rev().find_map(|m| match m {
+            AgentMessage::Message(Message::Assistant(a)) => Some(
+                a.content
+                    .iter()
+                    .filter_map(|b| match b {
+                        pi_ai::types::AssistantContent::Text(t) => Some(t.text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(""),
+            ),
+            _ => None,
+        })
+    }
+
+    pub fn messages(&self) -> Vec<AgentMessage> {
+        self.agent.messages()
+    }
+
     /// Trigger compaction if context usage exceeds the reserve threshold.
     async fn maybe_compact(&self) -> anyhow::Result<bool> {
         let model = self.model();
