@@ -1,0 +1,26 @@
+[package]
+name = "pi-core"
+description = "AgentSession: lifecycle, system prompt, compaction, retry (port of coding-agent core)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pi-ai = { workspace = true }
+pi-agent = { workspace = true }
+pi-tools = { workspace = true }
+pi-session = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

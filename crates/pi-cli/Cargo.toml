@@ -1,0 +1,30 @@
+[package]
+name = "pi-cli"
+description = "Headless coding agent CLI (print / json / rpc modes)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "pi-rs"
+path = "src/main.rs"
+
+[dependencies]
+pi-ai = { workspace = true }
+pi-agent = { workspace = true }
+pi-tools = { workspace = true }
+pi-session = { workspace = true }
+pi-core = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true
