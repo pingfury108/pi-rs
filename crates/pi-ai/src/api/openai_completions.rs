@@ -108,15 +108,23 @@ pub fn build_body(model: &Model, messages: &[Message], options: &StreamOptions) 
     }
 
     if !tools.is_empty() {
+        // constrained sampling: strict JSON-schema mode when the schema
+        // converts cleanly (pi's resolveJsonSchemaStrictSampling)
         let converted: Vec<Value> = tools
             .iter()
             .map(|t| {
+                let (parameters, strict) =
+                    match crate::constrained_sampling::resolve_strict(&t.parameters, true) {
+                        Some(strict_schema) => (strict_schema, true),
+                        None => (t.parameters.clone(), false),
+                    };
                 json!({
                     "type": "function",
                     "function": {
                         "name": t.name,
                         "description": t.description,
-                        "parameters": t.parameters,
+                        "parameters": parameters,
+                        "strict": strict,
                     },
                 })
             })

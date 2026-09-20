@@ -91,11 +91,14 @@ pub fn build_body(model: &Model, messages: &[Message], options: &StreamOptions) 
         let converted: Vec<Value> = tools
             .iter()
             .map(|t| {
+                let parameters = crate::constrained_sampling::resolve_strict(&t.parameters, true)
+                    .unwrap_or_else(|| t.parameters.clone());
                 json!({
                     "type": "function",
                     "name": t.name,
                     "description": t.description,
-                    "parameters": t.parameters,
+                    "parameters": parameters,
+                    "strict": true,
                 })
             })
             .collect();
