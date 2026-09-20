@@ -1,13 +1,28 @@
-//! pi-cli: Headless coding agent CLI (print / json modes).
+//! pi-cli: Headless coding agent CLI (print / json / repl modes).
+
+mod repl;
 
 use std::io::Write as _;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use anyhow::Context as _;
 use clap::Parser;
 use pi_agent::AgentEvent;
-use pi_core::{build_api, build_model, resolve_api_key, AgentSession, SessionOptions};
+use pi_core::{
+    build_api, build_model, load_custom_providers, load_settings, resolve_api_key,
+    resolve_custom_model, AgentSession, SessionOptions,
+};
+
+const PROVIDERS_KNOWN: &[&str] = &[
+    "anthropic",
+    "openai",
+    "deepseek",
+    "openrouter",
+    "moonshotai",
+    "kimi-coding",
+    "groq",
+    "xai",
+];
 
 /// Headless coding agent (Rust port of pi's core, no TUI).
 #[derive(Parser, Debug)]
@@ -56,6 +71,22 @@ struct Cli {
     /// Print the session file path and exit.
     #[arg(long, default_value_t = false)]
     print_session: bool,
+
+    /// Enter interactive REPL mode (default when no prompt is given on a TTY).
+    #[arg(long, default_value_t = false)]
+    repl: bool,
+
+    /// List saved sessions and exit.
+    #[arg(long, default_value_t = false)]
+    list_sessions: bool,
+
+    /// Continue the most recent session.
+    #[arg(long, default_value_t = false)]
+    continue_last: bool,
+
+    /// List models (optional glob, e.g. 'anthropic/*') and exit.
+    #[arg(long, num_args = 0..=1, default_missing_value = "*")]
+    list_models: Option<String>,
 }
 
 #[tokio::main]
@@ -73,23 +104,62 @@ async fn main() -> anyhow::Result<()> {
         .clone()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
+    if cli.list_sessions {
+        for f in AgentSession::list_sessions() {
+            println!("{}", f.display());
+        }
+        return Ok(());
+    }
+    if let Some(pattern) = &cli.list_models {
+        let catalog = pi_core::model_catalog::load_catalog().await;
+        for entry in pi_core::model_catalog::catalog_list(&catalog, Some(pattern)) {
+            println!("{entry}");
+        }
+        return Ok(());
+    }
+
     let provider = cli
         .provider
         .clone()
         .or_else(|| std::env::var("PI_RS_PROVIDER").ok())
+        .or_else(|| load_settings().default_provider)
         .unwrap_or_else(|| "anthropic".to_string());
-    let api_key = cli
+    let api_key_opt = cli
         .api_key
         .clone()
         .or_else(|| std::env::var("PI_RS_API_KEY").ok());
-    let model = build_model(&provider, cli.model.as_deref(), cli.base_url.as_deref())
-        .map_err(anyhow::Error::msg)
-        .context("resolving model")?;
-    let api_key = resolve_api_key(&provider, api_key.as_deref())
-        .context("no API key found (use --api-key or the provider env var)")?;
+
+    // custom providers first, then static registry
+    let model_arg = cli.model.as_deref();
+    let (model, custom_key_env) =
+        match resolve_custom_model(&load_custom_providers(), &provider, model_arg) {
+            Some((model, env)) => (model, env),
+            None => (
+                build_model(&provider, model_arg, cli.base_url.as_deref())
+                    .map_err(anyhow::Error::msg)
+                    .context("resolving model")?,
+                None,
+            ),
+        };
+    let api_key = resolve_api_key(
+        &provider,
+        api_key_opt.as_deref().or(custom_key_env.as_deref()),
+    )
+    .context("no API key found (use --api-key, the provider env var or auth.json)")?;
     let api = build_api(&model.api)
         .map_err(anyhow::Error::msg)
         .context("building api")?;
+
+    let resume_path: Option<PathBuf> = if cli.continue_last {
+        Some(
+            AgentSession::list_sessions()
+                .pop()
+                .context("no saved sessions to continue")?,
+        )
+    } else {
+        cli.resume.clone()
+    };
+    let settings = load_settings();
 
     let session = AgentSession::new(SessionOptions {
         cwd: cwd.clone(),
@@ -97,14 +167,23 @@ async fn main() -> anyhow::Result<()> {
         api,
         api_key: Some(api_key),
         force_system_prompt: cli.system_prompt.clone(),
-        append_system_prompt: None,
-        resume_file: cli.resume.clone(),
-        compaction_enabled: !cli.no_compact,
+        append_system_prompt: settings.append_system_prompt.clone(),
+        resume_file: resume_path,
+        compaction_enabled: !cli.no_compact && settings.compaction_enabled.unwrap_or(true),
     })?;
 
     if cli.print_session {
         println!("{}", session.session_file().display());
         return Ok(());
+    }
+
+    if cli.repl {
+        let interactive = repl::Repl {
+            session,
+            provider,
+            cwd,
+        };
+        return Box::pin(interactive.run()).await;
     }
 
     let prompt = match cli.prompt {
@@ -212,6 +291,5 @@ async fn main() -> anyhow::Result<()> {
         });
         println!("{summary}");
     }
-    let _ = Arc::clone(&session);
     Ok(())
 }

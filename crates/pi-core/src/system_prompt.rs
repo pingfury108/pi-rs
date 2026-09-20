@@ -11,6 +11,8 @@ pub struct SystemPromptInput<'a> {
     /// Loaded AGENTS.md-style context files (path, content).
     pub context_files: Vec<(String, String)>,
     pub tools: &'a [std::sync::Arc<dyn AgentTool>],
+    /// Loaded skills for the skills prompt section.
+    pub skills: &'a [crate::skills::Skill],
     /// User append from settings.
     pub append_system_prompt: Option<String>,
     /// Full replacement (pi's forceSystemPrompt).
@@ -133,6 +135,14 @@ pub fn build_system_prompt(input: &SystemPromptInput<'_>) -> String {
         ));
     }
 
+    // skills (pi: formatSkillsForPrompt with a file-reading tool)
+    if !input.skills.is_empty() {
+        let rendered = crate::skills::format_skills_for_prompt(input.skills, "read");
+        if !rendered.is_empty() {
+            sections.push(("skills".to_string(), rendered));
+        }
+    }
+
     // cwd
     sections.push((
         "cwd".to_string(),
@@ -223,6 +233,7 @@ mod tests {
             cwd: Path::new("/work"),
             context_files: vec![("/work/AGENTS.md".into(), "Be nice.".into())],
             tools: &tools,
+            skills: &[],
             append_system_prompt: None,
             force_system_prompt: None,
         });
@@ -246,6 +257,7 @@ mod tests {
             cwd: Path::new("/work"),
             context_files: vec![],
             tools: &tools,
+            skills: &[],
             append_system_prompt: None,
             force_system_prompt: Some("custom only".into()),
         });

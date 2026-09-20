@@ -53,8 +53,9 @@ impl AgentSession {
             None => SessionManager::create(&sessions_dir(&options.cwd), &options.cwd)?,
         };
 
-        // System prompt from cwd context + tools.
+        // System prompt from cwd context + tools + skills.
         let context_files = crate::system_prompt::load_context_files(&options.cwd);
+        let skills = crate::skills::load_skills(&options.cwd);
         let system_prompt = {
             // tools are needed for prompt construction; build a temporary tool set
             let tools = tool_set(&options.cwd);
@@ -62,6 +63,7 @@ impl AgentSession {
                 cwd: &options.cwd,
                 context_files,
                 tools: &tools,
+                skills: &skills,
                 append_system_prompt: options.append_system_prompt.clone(),
                 force_system_prompt: options.force_system_prompt.clone(),
             })
@@ -358,6 +360,84 @@ impl AgentSession {
         Ok(move |model: &Model, context: &Context, options: &StreamOptions| {
             api.stream(model, context, options.clone())
         })
+    }
+
+    /// Branch to an earlier entry, generating a branch summary entry
+    /// (pi's branch summarization).
+    pub async fn branch(self: &Arc<Self>, from_id: Option<String>) -> anyhow::Result<()> {
+        // Summarize the abandoned branch tail (messages after from_id).
+        let (summary, from_entry_id) = {
+            let session = self.session.lock().unwrap();
+            let path = session.build_session_path(None);
+            let from_index = match &from_id {
+                Some(id) => path.iter().position(|e| e.id() == id).unwrap_or(0),
+                None => 0,
+            };
+            let tail: Vec<String> = path[from_index..]
+                .iter()
+                .filter_map(|e| match e {
+                    SessionEntry::Message(m) => Some(format_message_for_summary(&m.message)),
+                    _ => None,
+                })
+                .collect();
+            let from_entry_id = path
+                .get(from_index.saturating_sub(1))
+                .map(|e| e.id().to_string())
+                .unwrap_or_else(|| path.first().map(|e| e.id().to_string()).unwrap_or_default());
+            (tail.join("\n\n"), from_entry_id)
+        };
+
+        let summary = if summary.is_empty() {
+            "(empty branch)".to_string()
+        } else {
+            self.complete_once(
+                &SUMMARIZATION_SYSTEM_PROMPT,
+                &format!("Summarize the following conversation:\n\n{summary}"),
+            )
+            .await
+            .unwrap_or_else(|_| "(summary unavailable)".to_string())
+        };
+
+        self.session.lock().unwrap().append(SessionEntry::BranchSummary(
+            pi_session::BranchSummaryEntry {
+                base: EntryBase {
+                    id: uuid::Uuid::now_v7().to_string(),
+                    parent_id: None,
+                    timestamp: chrono_now_rfc3339(),
+                },
+                from_id: from_entry_id,
+                summary,
+                details: None,
+                usage: None,
+                from_hook: false,
+            },
+        ))?;
+        if from_id.is_some() {
+            self.session.lock().unwrap().branch(from_id);
+        }
+        Ok(())
+    }
+
+    /// Slash-command surface: session file list.
+    pub fn list_sessions() -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        if let Some(home) = std::env::var_os("HOME") {
+            let root = Path::new(&home).join(".pi-rs/agent/sessions");
+            if let Ok(dirs) = std::fs::read_dir(&root) {
+                for dir in dirs.flatten() {
+                    if let Ok(files) = std::fs::read_dir(dir.path()) {
+                        for file in files.flatten() {
+                            let p = file.path();
+                            if p.extension().is_some_and(|e| e == "jsonl") {
+                                out.push(p);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out.sort();
+        out
     }
 
     fn last_assistant_usage(&self) -> Option<Usage> {

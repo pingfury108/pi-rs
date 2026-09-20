@@ -21,6 +21,8 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
+reqwest = { workspace = true, features = ["blocking"] }
+globset = "0.4"
 
 [lints]
 workspace = true
