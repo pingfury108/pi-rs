@@ -6,12 +6,22 @@
 //! `stop_reason` of `error`/`aborted`.
 
 pub mod anthropic;
+pub mod bedrock;
 pub mod faux;
+pub mod google;
+pub mod mistral;
 pub mod openai_completions;
+pub mod openai_responses;
+pub mod pi_messages;
 
 pub use anthropic::AnthropicApi;
+pub use bedrock::BedrockApi;
 pub use faux::{FauxApi, FauxResponse};
+pub use google::GoogleApi;
+pub use mistral::MistralApi;
 pub use openai_completions::OpenAICompletionsApi;
+pub use openai_responses::OpenAIResponsesApi;
+pub use pi_messages::PiMessagesApi;
 
 use std::collections::BTreeMap;
 
@@ -184,5 +194,104 @@ mod tests {
         // context.tools acts as the leading system message's toolsAdded;
         // later system messages append (b) and remove (a).
         assert_eq!(names, ["c", "b"]);
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Shared streaming-request plumbing used by the API implementations.
+// ---------------------------------------------------------------------------
+
+/// Outcome of opening an SSE stream: the byte stream to iterate.
+pub(crate) type SseBody = std::pin::Pin<
+    Box<dyn futures::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send>,
+>;
+
+/// Issue the initial POST and return the response body stream, applying the
+/// retry policy for transport errors and retryable statuses. On failure the
+/// error message is stored in `error_slot` and `Err(reason)` returned.
+pub(crate) async fn open_sse_post(
+    http: &reqwest::Client,
+    retry: &RetryPolicy,
+    url: &str,
+    headers: Vec<(String, String)>,
+    body: &serde_json::Value,
+    cancel: &Option<tokio_util::sync::CancellationToken>,
+    error_slot: &mut String,
+) -> Result<SseBody, crate::types::StopReason> {
+    let aborted = || cancel.as_ref().is_some_and(|c| c.is_cancelled());
+
+    let mut attempt = 0u32;
+    loop {
+        if aborted() {
+            return Err(crate::types::StopReason::Aborted);
+        }
+        let mut request = http.post(url).json(body);
+        for (name, value) in &headers {
+            request = request.header(name, value);
+        }
+        match request.send().await {
+            Ok(resp) if resp.status().is_success() => {
+                return Ok(Box::pin(resp.bytes_stream()));
+            }
+            Ok(resp) => {
+                let status = resp.status().as_u16();
+                let text = resp.text().await.unwrap_or_default();
+                if !is_retryable_status(status) || attempt >= retry.max_retries {
+                    *error_slot = format!("HTTP {status}: {}", truncate_str(&text, 2048));
+                    return Err(crate::types::StopReason::Error);
+                }
+                tracing::warn!(status, attempt, "request failed, retrying");
+                attempt += 1;
+                let delay = std::time::Duration::from_millis(
+                    retry.base_delay_ms.saturating_mul(2u64.saturating_pow(attempt)),
+                )
+                .min(std::time::Duration::from_millis(retry.max_delay_ms));
+                if !wait_or_abort(cancel, delay).await {
+                    return Err(crate::types::StopReason::Aborted);
+                }
+            }
+            Err(err) => {
+                if attempt >= retry.max_retries {
+                    *error_slot = format!("request failed: {err}");
+                    return Err(crate::types::StopReason::Error);
+                }
+                tracing::warn!(%err, attempt, "request error, retrying");
+                attempt += 1;
+                let delay = std::time::Duration::from_millis(
+                    retry.base_delay_ms.saturating_mul(2u64.saturating_pow(attempt)),
+                )
+                .min(std::time::Duration::from_millis(retry.max_delay_ms));
+                if !wait_or_abort(cancel, delay).await {
+                    return Err(crate::types::StopReason::Aborted);
+                }
+            }
+        }
+    }
+}
+
+/// Wait for `delay`, returning false when cancelled.
+pub(crate) async fn wait_or_abort(
+    cancel: &Option<tokio_util::sync::CancellationToken>,
+    delay: std::time::Duration,
+) -> bool {
+    match cancel {
+        Some(token) => {
+            tokio::select! {
+                _ = tokio::time::sleep(delay) => true,
+                _ = token.cancelled() => false,
+            }
+        }
+        None => {
+            tokio::time::sleep(delay).await;
+            true
+        }
+    }
+}
+
+pub(crate) fn truncate_str(s: &str, max: usize) -> &str {
+    match s.char_indices().nth(max) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
     }
 }

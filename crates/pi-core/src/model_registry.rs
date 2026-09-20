@@ -145,6 +145,13 @@ pub fn build_api(api: &str) -> Result<std::sync::Arc<dyn pi_ai::api::LlmApi>, St
     match api {
         "anthropic-messages" => Ok(std::sync::Arc::new(pi_ai::api::AnthropicApi::new())),
         "openai-completions" => Ok(std::sync::Arc::new(pi_ai::api::OpenAICompletionsApi::new())),
+        "openai-responses" | "azure-openai-responses" => {
+            Ok(std::sync::Arc::new(pi_ai::api::OpenAIResponsesApi::new()))
+        }
+        "google-generative-ai" | "google-vertex" => Ok(std::sync::Arc::new(pi_ai::api::GoogleApi::new())),
+        "mistral-conversations" => Ok(std::sync::Arc::new(pi_ai::api::MistralApi::new())),
+        "bedrock-converse-stream" => Ok(std::sync::Arc::new(pi_ai::api::BedrockApi::new())),
+        "pi-messages" => Ok(std::sync::Arc::new(pi_ai::api::PiMessagesApi::new())),
         other => Err(format!("unsupported api: {other}")),
     }
 }

@@ -13,16 +13,6 @@ use pi_core::{
     resolve_custom_model, AgentSession, SessionOptions,
 };
 
-const PROVIDERS_KNOWN: &[&str] = &[
-    "anthropic",
-    "openai",
-    "deepseek",
-    "openrouter",
-    "moonshotai",
-    "kimi-coding",
-    "groq",
-    "xai",
-];
 
 /// Headless coding agent (Rust port of pi's core, no TUI).
 #[derive(Parser, Debug)]
