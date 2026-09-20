@@ -207,7 +207,7 @@ API key 解析顺序：`--api-key` → 环境变量（`KIMI_CODING_API_KEY` / pr
 | 7b | 协议层：google-generative-ai(+vertex)、openai-responses(+azure)、mistral、bedrock(SigV4+eventstream)、pi-messages；模型解析链接入目录 | ✅ |
 | 7c | constrained sampling（strict JSON-schema 工具） | ✅ |
 | 7d | RPC mode（JSONL 双向协议） | ✅ 远端 Linux 真实 API 验收 |
-| 7d' | extensions（rhai 脚本）、周边（usage-totals、export-html、trust-manager、cache-warmer） | ⬜ |
+| 7d' | extensions（rhai 脚本）：on_event / before_tool_call / after_tool_call / register_tool | ✅（周边工具待做） |
 | 7e(可选) | 图片输入管线、read 工具图片输出、bash 进程组 kill、完整 JSON Schema 参数校验 | ⬜ |
 
 明确不做（用户决策）：OAuth 登录流（Copilot/Codex/Qwen）。
