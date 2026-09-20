@@ -194,14 +194,24 @@ pi-rs --no-compact -p "..."                             # 禁用自动 compactio
 
 API key 解析顺序：`--api-key` → 环境变量（`KIMI_CODING_API_KEY` / provider 默认名）→ `~/.pi-rs/agent/auth.json`（pi 格式兼容）。
 
-## 九、已知边界（后续迭代）
+## 九、Phase 7 路线图（进行中）
 
-- 模型目录为静态内置表（8 个 provider），未接 pi 的全量生成目录
+| 批次 | 内容 | 状态 |
+|---|---|---|
+| 7a | REPL + slash 命令、Skills、prompt templates + @file、settings/models.json、models.dev 目录、分支摘要、--list/--continue/--list-models | ✅ |
+| 7b | 协议层：google-generative-ai(+vertex)、openai-responses(+azure)、mistral、bedrock(SigV4+eventstream)、pi-messages；模型解析链接入目录 | ✅ |
+| 7c | constrained sampling（strict JSON-schema 工具） | ✅ |
+| 7d | RPC mode（JSONL 双向协议）、extensions（rhai 脚本）、周边（usage-totals、export-html、trust-manager、cache-warmer） | ⬜ |
+| 7e(可选) | 图片输入管线、read 工具图片输出、bash 进程组 kill、完整 JSON Schema 参数校验 | ⬜ |
+
+明确不做（用户决策）：OAuth 登录流（Copilot/Codex/Qwen）。
+
+## 十、当前已知边界
+
 - read 工具暂不支持图片输出（返回文本 note）
 - bash 进程组级 kill 未接 libc
-- 工具参数完整 JSON Schema 校验未接 schemars
-- steering/compaction hooks、steering 队列的 Agent 级 API 已就绪，CLI 未暴露
-- 无 extensions/rhai 插件、无 RPC server 模式（Phase 7）
+- 工具参数完整 JSON Schema 校验未接 schemars（strict 模式已有）
+- vertex/bedrock 需手工提供凭证环境变量（GCP token / AWS keys）
 
 核心约 6000~8000 行 Rust。
 
