@@ -27,6 +27,22 @@ pub enum ThinkingLevel {
     Max,
 }
 
+impl std::str::FromStr for ThinkingLevel {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "off" => Ok(Self::Off),
+            "minimal" => Ok(Self::Minimal),
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::Xhigh),
+            "max" => Ok(Self::Max),
+            other => Err(format!("unknown thinking level: {other}")),
+        }
+    }
+}
+
 /// A message in the agent transcript: either an LLM message or an app-specific
 /// custom message (pi's `AgentMessage`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -296,6 +312,18 @@ pub enum AgentEvent {
         tool_name: String,
         result: Box<AgentToolResult>,
         is_error: bool,
+    },
+    // session-level auto retry (pi: auto_retry_start / auto_retry_end)
+    AutoRetryStart {
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        error_message: String,
+    },
+    AutoRetryEnd {
+        success: bool,
+        attempt: u32,
+        final_error: Option<String>,
     },
 }
 

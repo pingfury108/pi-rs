@@ -86,7 +86,7 @@ pub async fn run_rpc(session: Arc<AgentSession>) -> anyhow::Result<()> {
             }
             // stdin closed and no active run: shut down cleanly
             _ = tokio::time::sleep(std::time::Duration::from_millis(100)), if stdin_closed => {
-                if !session.agent.is_streaming() {
+                if !session.is_streaming() {
                     break;
                 }
             }
@@ -163,17 +163,40 @@ async fn handle_command(session: &Arc<AgentSession>, command: Value) -> Value {
             match pi_core::build_model(provider, Some(model_id), None)
                 .map_err(anyhow::Error::msg)
             {
-                Ok(model) => {
-                    session.set_model(model.clone());
-                    success(Some(json!({"provider": model.provider, "modelId": model.id})))
-                }
+                Ok(model) => match session.set_model(model.clone(), None) {
+                    Ok(()) => success(Some(json!({"provider": model.provider, "modelId": model.id}))),
+                    Err(e) => failure(e.to_string()),
+                },
                 Err(e) => failure(e.to_string()),
             }
         }
         "set_thinking_level" => {
-            // accepted for protocol parity; applied on next session start in
-            // this build
-            success(None)
+            let Some(level) = command.get("level").and_then(Value::as_str) else {
+                return failure("missing level".into());
+            };
+            match level.parse::<pi_agent::ThinkingLevel>() {
+                Ok(level) => {
+                    session.set_thinking_level(level);
+                    success(None)
+                }
+                Err(_) => failure(format!(
+                    "invalid level {level} (off|minimal|low|medium|high|xhigh|max)"
+                )),
+            }
+        }
+        "set_auto_retry" => {
+            let enabled = command.get("enabled").and_then(Value::as_bool);
+            match enabled {
+                Some(true) => {
+                    session.set_auto_retry(Some(pi_core::agent_session::RetrySettings::default()));
+                    success(None)
+                }
+                Some(false) => {
+                    session.set_auto_retry(None);
+                    success(None)
+                }
+                None => failure("missing enabled".into()),
+            }
         }
         "compact" => match session.force_compact().await {
             Ok(compacted) => success(Some(json!({"compacted": compacted}))),

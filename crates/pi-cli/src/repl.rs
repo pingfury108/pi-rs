@@ -20,7 +20,7 @@ impl Repl {
         let stdin = std::io::stdin();
         let templates = load_prompt_templates(&self.cwd);
         println!(
-            "pi-rs REPL — provider={}, session={}\ncommands: /help /quit /branch [entryId] /sessions /templates /template <name> [args] /steer <text>",
+            "pi-rs REPL — provider={}, session={}\ncommands: /help /quit /model <provider> <model> /thinking [level] /compact /branch [entryId] /sessions /templates /template <name> [args] /steer <text>",
             self.provider,
             self.session.session_file().display()
         );
@@ -42,8 +42,54 @@ impl Repl {
             match line.split_whitespace().next().unwrap_or("") {
                 "/quit" | "/exit" | "/q" => break,
                 "/help" => println!(
-                    "/help /quit /branch [entryId] /sessions /templates /template <name> [args...] /steer <text>"
+                    "/help /quit /model <provider> <modelId> /thinking [level] /compact /branch [entryId] /sessions /templates /template <name> [args...] /steer <text>"
                 ),
+                "/model" => {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    match (parts.get(1), parts.get(2)) {
+                        (Some(provider), Some(model_id)) => {
+                            match pi_core::build_model(provider, Some(model_id), None)
+                                .map_err(anyhow::Error::msg)
+                                .and_then(|model| {
+                                    self.session
+                                        .set_model(model.clone(), None)
+                                        .map(|_| model)
+                                        .map_err(anyhow::Error::msg)
+                                }) {
+                                Ok(model) => println!("model -> {}/{}", model.provider, model.id),
+                                Err(e) => println!("model switch failed: {e}"),
+                            }
+                        }
+                        _ => {
+                            let model = self.session.model();
+                            println!(
+                                "{}/{} (usage: /model <provider> <modelId>)",
+                                model.provider, model.id
+                            );
+                        }
+                    }
+                }
+                "/thinking" => {
+                    let level = line.split_whitespace().nth(1);
+                    match level {
+                        Some(raw) => match raw.parse::<pi_agent::ThinkingLevel>() {
+                            Ok(level) => {
+                                self.session.set_thinking_level(level);
+                                println!("thinking -> {level:?}");
+                            }
+                            Err(e) => println!("{e}"),
+                        },
+                        None => println!(
+                            "thinking = {:?} (usage: /thinking <off|minimal|low|medium|high|xhigh|max>)",
+                            self.session.thinking_level()
+                        ),
+                    }
+                }
+                "/compact" => match self.session.force_compact().await {
+                    Ok(true) => println!("compacted"),
+                    Ok(false) => println!("nothing to compact"),
+                    Err(e) => println!("compact failed: {e}"),
+                },
                 "/sessions" => {
                     for f in AgentSession::list_sessions() {
                         println!("{}", f.display());

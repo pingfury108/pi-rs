@@ -59,6 +59,10 @@ struct Cli {
     #[arg(long, default_value_t = false)]
     no_compact: bool,
 
+    /// Disable automatic retry of transient LLM errors.
+    #[arg(long, default_value_t = false)]
+    no_retry: bool,
+
     /// Print the session file path and exit.
     #[arg(long, default_value_t = false)]
     print_session: bool,
@@ -165,6 +169,11 @@ async fn main() -> anyhow::Result<()> {
         append_system_prompt: settings.append_system_prompt.clone(),
         resume_file: resume_path,
         compaction_enabled: !cli.no_compact && settings.compaction_enabled.unwrap_or(true),
+        auto_retry: if cli.no_retry {
+            None
+        } else {
+            Some(pi_core::agent_session::RetrySettings::default())
+        },
     })?;
 
     if cli.print_session {
@@ -200,7 +209,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut events = session.subscribe();
-    let runner = session.prompt(&prompt);
+    let mut runner = Box::pin(session.prompt(&prompt));
+    // captured when the runner branch wins the select; awaiting a finished
+    // JoinHandle again would panic
+    let mut prompt_result: Option<anyhow::Result<Vec<pi_agent::AgentMessage>>> = None;
 
     let json_mode = cli.mode == "json";
     let stdout = std::io::stdout();
@@ -209,7 +221,36 @@ async fn main() -> anyhow::Result<()> {
     if !json_mode {
         // text mode: stream assistant text deltas; annotate tool activity
         let mut current_tool: Option<String> = None;
-        while let Ok(event) = events.recv().await {
+        let mut runner_done = false;
+        loop {
+            if runner_done {
+                // drain briefly; the final agent_end may still be buffered
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(500),
+                    events.recv(),
+                )
+                .await
+                {
+                    Ok(Ok(event)) => {
+                        if matches!(event, AgentEvent::AgentEnd { .. }) {
+                            break;
+                        }
+                        continue;
+                    }
+                    _ => break,
+                }
+            }
+            let event = tokio::select! {
+                event = events.recv(), if !runner_done => event,
+                res = &mut runner, if !runner_done => {
+                    prompt_result = Some(res.unwrap_or_else(|e| {
+                        anyhow::bail!(e.to_string())
+                    }));
+                    runner_done = true;
+                    continue;
+                }
+            };
+            let Ok(event) = event else { break };
             match &event {
                 AgentEvent::MessageUpdate { assistant_message_event, .. } => {
                     use pi_ai::events::AssistantMessageEvent as E;
@@ -234,18 +275,68 @@ async fn main() -> anyhow::Result<()> {
                         writeln!(out).ok();
                     }
                 }
-                AgentEvent::AgentEnd { .. } => break,
+                AgentEvent::AgentEnd { .. } => {
+                    if runner_done {
+                        break;
+                    }
+                }
+                AgentEvent::AutoRetryStart { attempt, max_attempts, delay_ms, error_message } => {
+                    writeln!(
+                        out,
+                        "\n[auto retry {attempt}/{max_attempts} in {delay_ms}ms: {error_message}]"
+                    )
+                    .ok();
+                }
+                AgentEvent::AutoRetryEnd { success, .. } => {
+                    if !success {
+                        writeln!(out, "\n[auto retry exhausted]").ok();
+                    }
+                }
                 _ => {}
             }
         }
-    } else {
+        out.flush().ok();
+    }
+
+    if json_mode {
         // json mode: every event as one JSON line
-        while let Ok(event) = events.recv().await {
+        let mut runner_done = false;
+        loop {
+            if runner_done {
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(500),
+                    events.recv(),
+                )
+                .await
+                {
+                    Ok(Ok(event)) => {
+                        if matches!(event, AgentEvent::AgentEnd { .. }) {
+                            break;
+                        }
+                        if let Ok(line) = serde_json::to_string(&event) {
+                            writeln!(out, "{line}").ok();
+                        }
+                        continue;
+                    }
+                    _ => break,
+                }
+            }
+            let event = tokio::select! {
+                event = events.recv(), if !runner_done => event,
+                res = &mut runner, if !runner_done => {
+                    prompt_result = Some(res.unwrap_or_else(|e| {
+                        anyhow::bail!(e.to_string())
+                    }));
+                    runner_done = true;
+                    continue;
+                }
+            };
+            let Ok(event) = event else { break };
             if matches!(&event, AgentEvent::AgentEnd { .. }) {
                 if let Ok(line) = serde_json::to_string(&event) {
                     writeln!(out, "{line}").ok();
                 }
-                break;
+                continue;
             }
             // expand message_update into the raw assistant stream event for parity
             let value = match &event {
@@ -264,7 +355,10 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let new_messages = runner.await??;
+    let new_messages = match prompt_result {
+        Some(result) => result?,
+        None => runner.await??,
+    };
 
     // non-zero exit when the final assistant message errored
     if let Some(last) = new_messages.iter().rev().find_map(|m| match m {

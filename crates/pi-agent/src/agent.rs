@@ -179,6 +179,22 @@ impl Agent {
         *self.hooks.lock().unwrap() = Some(hooks);
     }
 
+    /// Emit a session-level event (e.g. auto-retry notifications).
+    pub fn emit(&self, event: AgentEvent) {
+        let _ = self.event_tx.send(event);
+    }
+
+    /// Remove and return the trailing assistant message (auto-retry keeps
+    /// the failed message in the session file but drops it from context).
+    pub fn pop_last_assistant_message(&self) -> Option<AgentMessage> {
+        let mut state = self.state.lock().unwrap();
+        if matches!(state.messages.last(), Some(AgentMessage::Message(pi_ai::types::Message::Assistant(_)))) {
+            state.messages.pop()
+        } else {
+            None
+        }
+    }
+
     /// Abort the current run.
     pub fn abort(&self) {
         if let Some(cancel) = self.cancel.lock().unwrap().as_ref() {

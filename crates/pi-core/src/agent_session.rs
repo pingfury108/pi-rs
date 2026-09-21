@@ -3,6 +3,7 @@
 //! automatic context compaction.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use crate::extensions::ExtensionHost;
@@ -32,6 +33,26 @@ pub struct SessionOptions {
     /// Resume this session file instead of creating a new one.
     pub resume_file: Option<PathBuf>,
     pub compaction_enabled: bool,
+    /// Retry LLM calls on transient errors (default true, max 3 attempts).
+    pub auto_retry: Option<RetrySettings>,
+}
+
+/// Auto-retry settings (pi's retry settings defaults).
+#[derive(Debug, Clone)]
+pub struct RetrySettings {
+    pub max_retries: u32,
+    pub base_delay_ms: u64,
+    pub max_delay_ms: u64,
+}
+
+impl Default for RetrySettings {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            base_delay_ms: 500,
+            max_delay_ms: 30_000,
+        }
+    }
 }
 
 pub const DEFAULT_RESERVE_TOKENS: u64 = 16_384;
@@ -43,9 +64,16 @@ pub struct AgentSession {
     pub agent: Agent,
     session: Mutex<SessionManager>,
     model: Mutex<Model>,
+    thinking_level: Mutex<pi_agent::ThinkingLevel>,
     compaction_enabled: bool,
+    auto_retry: Mutex<Option<RetrySettings>>,
+    retry_attempt: std::sync::atomic::AtomicU32,
+    busy: std::sync::atomic::AtomicBool,
     cancel: CancellationToken,
     extensions: Arc<ExtensionHost>,
+    api_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<dyn pi_ai::api::LlmApi>>>>,
+    /// Per-provider API keys resolved up front (provider hot-switch support).
+    api_keys: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
 }
 
 impl AgentSession {
@@ -72,13 +100,49 @@ impl AgentSession {
             })
         };
 
-        let api = options.api.clone();
+        let api_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<dyn pi_ai::api::LlmApi>>>> =
+            Arc::default();
+        api_cache
+            .lock()
+            .unwrap()
+            .insert(options.model.api.clone(), options.api.clone());
+
+        // pre-resolve keys for every known provider (hot model switching)
+        let api_keys: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>> = {
+            let mut map = std::collections::HashMap::new();
+            for defaults in crate::model_registry::PROVIDERS {
+                if let Some(key) = crate::model_registry::resolve_api_key(defaults.provider, None) {
+                    map.insert(defaults.provider.to_string(), key);
+                }
+            }
+            if let Some(key) = &options.api_key {
+                map.insert(options.model.provider.clone(), key.clone());
+            }
+            Arc::new(std::sync::Mutex::new(map))
+        };
+
         let stream_fn: StreamFn = {
-            let api = api.clone();
-            let api_key = options.api_key.clone();
+            let cache = api_cache.clone();
+            let keys = api_keys.clone();
             Arc::new(move |model, context, options| {
+                // resolve (and cache) the protocol implementation for this api
+                let api = {
+                    let mut map = cache.lock().unwrap();
+                    match map.get(&model.api) {
+                        Some(api) => api.clone(),
+                        None => {
+                            let api = crate::model_registry::build_api(&model.api)
+                                .unwrap_or_else(|e| panic!("{e}"));
+                            map.insert(model.api.clone(), api.clone());
+                            api
+                        }
+                    }
+                };
                 let mut opts = options.clone();
-                opts.api_key = opts.api_key.or_else(|| api_key.clone());
+                opts.api_key = opts
+                    .api_key
+                    .clone()
+                    .or_else(|| keys.lock().unwrap().get(&model.provider).cloned());
                 api.stream(model, context, opts)
             })
         };
@@ -119,9 +183,15 @@ impl AgentSession {
             agent,
             session: Mutex::new(session),
             model: Mutex::new(options.model.clone()),
+            thinking_level: Mutex::new(pi_agent::ThinkingLevel::Off),
             compaction_enabled: options.compaction_enabled,
+            auto_retry: Mutex::new(Some(options.auto_retry.clone().unwrap_or_default())),
+            retry_attempt: std::sync::atomic::AtomicU32::new(0),
+            busy: std::sync::atomic::AtomicBool::new(false),
             cancel: CancellationToken::new(),
             extensions: extension_host,
+            api_cache,
+            api_keys,
         }))
     }
 
@@ -137,9 +207,48 @@ impl AgentSession {
         self.model.lock().unwrap().clone()
     }
 
-    pub fn set_model(&self, model: Model) {
+    /// Hot-switch model (provider changes rebuild the api via the cache).
+    pub fn set_model(&self, model: Model, api_key: Option<String>) -> anyhow::Result<()> {
+        // pre-build the new protocol implementation so failures surface here
+        if !self.api_cache.lock().unwrap().contains_key(&model.api) {
+            let api = crate::model_registry::build_api(&model.api).map_err(anyhow::Error::msg)?;
+            self.api_cache.lock().unwrap().insert(model.api.clone(), api);
+        }
+        if let Some(key) = api_key {
+            self.api_keys
+                .lock()
+                .unwrap()
+                .insert(model.provider.clone(), key);
+        }
         *self.model.lock().unwrap() = model.clone();
         self.agent.set_model(model);
+        Ok(())
+    }
+
+    pub fn thinking_level(&self) -> pi_agent::ThinkingLevel {
+        *self.thinking_level.lock().unwrap()
+    }
+
+    pub fn set_thinking_level(&self, level: pi_agent::ThinkingLevel) {
+        *self.thinking_level.lock().unwrap() = level;
+        self.agent.set_thinking_level(level);
+    }
+
+    pub fn set_auto_retry(&self, settings: Option<RetrySettings>) {
+        *self.auto_retry.lock().unwrap() = settings;
+    }
+
+    /// True while a prompt run (including auto-retry) is in progress.
+    pub fn is_streaming(&self) -> bool {
+        self.busy.load(Ordering::SeqCst)
+    }
+
+    /// Exponential backoff per pi's retryDelayMs.
+    fn retry_delay_ms(settings: &RetrySettings, attempt: u32) -> u64 {
+        let delay = settings
+            .base_delay_ms
+            .saturating_mul(2u64.saturating_pow(attempt.saturating_sub(1)));
+        delay.min(settings.max_delay_ms)
     }
 
     pub fn abort(&self) {
@@ -163,6 +272,7 @@ impl AgentSession {
         if let Err(e) = self.session.lock().unwrap().append_message(user_message.clone()) {
             return tokio::spawn(async move { Err(anyhow::anyhow!("session append failed: {e}")) });
         }
+        assert!(!self.busy.swap(true, Ordering::SeqCst), "session is already streaming");
 
         // Rebuild agent transcript from the session so steering/branch state stays canonical.
         let context_messages = self.session.lock().unwrap().build_context_messages(None);
@@ -179,6 +289,7 @@ impl AgentSession {
 
         let this = self.clone();
         let persist_this = self.clone();
+        self.busy.store(true, Ordering::SeqCst);
         tokio::spawn(async move {
             let mut events = this.subscribe();
 
@@ -204,7 +315,57 @@ impl AgentSession {
                 }
             });
 
-            let new_messages = this.agent.prompt(user_message).await;
+            let mut new_messages = this.agent.prompt(user_message).await;
+
+            // Auto-retry transient LLM errors (pi's _prepareRetry semantics):
+            // drop the failed assistant message from context, back off, retry.
+            loop {
+                let settings = this.auto_retry.lock().unwrap().clone();
+                let Some(settings) = settings else { break };
+                let last_error = last_assistant_error(&new_messages);
+                let Some(error_message) = last_error else {
+                    // success: reset attempt counter
+                    let attempt = this.retry_attempt.swap(0, Ordering::SeqCst);
+                    if attempt > 0 {
+                        this.agent.emit(AgentEvent::AutoRetryEnd {
+                            success: true,
+                            attempt,
+                            final_error: None,
+                        });
+                    }
+                    break;
+                };
+                if this.cancel.is_cancelled() {
+                    break;
+                }
+                let attempt = this.retry_attempt.fetch_add(1, Ordering::SeqCst) + 1;
+                if attempt > settings.max_retries {
+                    this.agent.emit(AgentEvent::AutoRetryEnd {
+                        success: false,
+                        attempt: attempt - 1,
+                        final_error: Some(error_message.clone()),
+                    });
+                    this.retry_attempt.store(0, Ordering::SeqCst);
+                    break;
+                }
+                let delay = Self::retry_delay_ms(&settings, attempt);
+                this.agent.emit(AgentEvent::AutoRetryStart {
+                    attempt,
+                    max_attempts: settings.max_retries,
+                    delay_ms: delay,
+                    error_message: error_message.clone(),
+                });
+                this.agent.pop_last_assistant_message();
+                let token = this.cancel.clone();
+                tokio::select! {
+                    _ = token.cancelled() => break,
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(delay)) => {}
+                }
+                if this.cancel.is_cancelled() {
+                    break;
+                }
+                new_messages = this.agent.retry().await;
+            }
             // give the persister a moment to drain remaining events
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             persister.abort();
@@ -214,6 +375,7 @@ impl AgentSession {
                     tracing::warn!("compaction failed: {e}");
                 }
             }
+            this.busy.store(false, Ordering::SeqCst);
             Ok(new_messages)
         })
     }
@@ -652,6 +814,27 @@ fn agent_system_prompt(agent: &Agent) -> String {
             _ => None,
         })
         .unwrap_or_default()
+}
+
+/// Error message of the trailing assistant message when it is a retryable
+/// failure (pi's _isRetryableError; aborted runs and context overflow are not
+/// retried here).
+fn last_assistant_error(messages: &[AgentMessage]) -> Option<String> {
+    let last = messages.iter().rev().find_map(|m| match m {
+        AgentMessage::Message(Message::Assistant(a)) => Some(a),
+        _ => None,
+    })?;
+    if last.stop_reason != StopReason::Error {
+        return None;
+    }
+    if last
+        .error_message
+        .as_deref()
+        .is_some_and(|m| m.contains("context length") || m.contains("context window"))
+    {
+        return None; // handled by compaction
+    }
+    Some(last.error_message.clone().unwrap_or_else(|| "unknown error".into()))
 }
 
 fn should_compact(context_tokens: u64, context_window: u64, reserve_tokens: u64) -> bool {

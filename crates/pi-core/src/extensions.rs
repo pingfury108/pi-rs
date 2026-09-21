@@ -49,13 +49,6 @@ impl Extension {
         self.ast.iter_functions().any(|f| f.name == name)
     }
 
-    fn call0(&self, fn_name: &str) -> Option<Dynamic> {
-        let mut scope = self.scope.lock().unwrap();
-        self.engine
-            .call_fn(&mut scope, &self.ast, fn_name, ())
-            .ok()
-    }
-
     fn call2(&self, fn_name: &str, a: String, b: String) -> Option<Dynamic> {
         let mut scope = self.scope.lock().unwrap();
         self.engine

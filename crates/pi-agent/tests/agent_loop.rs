@@ -562,5 +562,7 @@ fn event_name(event: &AgentEvent) -> &'static str {
         AgentEvent::ToolExecutionStart { .. } => "tool_execution_start",
         AgentEvent::ToolExecutionUpdate { .. } => "tool_execution_update",
         AgentEvent::ToolExecutionEnd { .. } => "tool_execution_end",
+        AgentEvent::AutoRetryStart { .. } => "auto_retry_start",
+        AgentEvent::AutoRetryEnd { .. } => "auto_retry_end",
     }
 }
