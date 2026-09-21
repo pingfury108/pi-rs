@@ -23,4 +23,11 @@ export KIMI_CODING_API_KEY=...   # or use ~/.pi-rs/agent/auth.json
 ./target/release/pi-rs --provider kimi-coding -p "What is 2+2?"
 ```
 
-See [docs/PLAN.md](docs/PLAN.md) for architecture, smoke tests and known limits.
+See [docs/PLAN.md](docs/PLAN.md) for architecture and roadmap,
+[docs/INTEGRATION.md](docs/INTEGRATION.md) for embedding pi-rs into your own
+project (three integration patterns with runnable examples):
+
+```bash
+cargo run -p pi-agent --example custom_agent   # minimal: custom tool + faux LLM
+cargo run -p pi-core  --example full_session   # full stack: session+compaction
+```
