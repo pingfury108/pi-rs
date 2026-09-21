@@ -219,6 +219,13 @@ API key 解析顺序：`--api-key` → 环境变量（`KIMI_CODING_API_KEY` / pr
 - 工具参数完整 JSON Schema 校验未接 schemars（strict 模式已有）
 - vertex/bedrock 需手工提供凭证环境变量（GCP token / AWS keys）
 
+## 十一、已完成的热能力（2026-09-20）
+
+- auto-retry：LLM error 自动指数退避重试（auto_retry_start/end 事件、--no-retry、set_auto_retry RPC）
+- /model <provider> <modelId> 热切换（跨 provider，per-provider key 预解析）
+- /thinking [level]（REPL）+ set_thinking_level（RPC）实时生效
+- /compact 接入手动压缩
+
 核心约 6000~8000 行 Rust。
 
 ## 七、风险点
