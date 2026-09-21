@@ -74,6 +74,9 @@ pub struct AgentSession {
     api_cache: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<dyn pi_ai::api::LlmApi>>>>,
     /// Per-provider API keys resolved up front (provider hot-switch support).
     api_keys: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
+    /// The single LLM entry point (api cache + key injection); used by the
+    /// agent loop AND auxiliary calls (compaction summaries).
+    stream_fn: StreamFn,
 }
 
 impl AgentSession {
@@ -147,7 +150,7 @@ impl AgentSession {
             })
         };
 
-        let agent = AgentBuilder::new(options.model.clone(), stream_fn)
+        let agent = AgentBuilder::new(options.model.clone(), stream_fn.clone())
             .system_prompt(system_prompt)
             .build();
 
@@ -157,6 +160,7 @@ impl AgentSession {
             agent.add_tool(tool);
         }
         install_extension_hooks(&agent, &extension_host);
+        install_api_key_resolver(&agent, &api_keys);
         spawn_event_forwarder(&agent, extension_host.clone());
 
         // Register tools.
@@ -192,6 +196,7 @@ impl AgentSession {
             extensions: extension_host,
             api_cache,
             api_keys,
+            stream_fn,
         }))
     }
 
@@ -543,25 +548,9 @@ impl AgentSession {
 
     async fn complete_once(&self, system: &str, user_text: &str) -> anyhow::Result<String> {
         let model = self.model();
-        let context = Context {
-            system_prompt: Some(system.to_string()),
-            messages: vec![Message::User(pi_ai::types::UserMessage {
-                content: pi_ai::types::MessageContent::text(user_text),
-                timestamp: pi_ai::types::now_millis(),
-            })],
-            tools: None,
-        };
-        // Route through the agent's stream_fn? The api is wrapped in Agent;
-        // simplest correct path: use the registered tool-free stream via the
-        // agent's stream function by calling the api directly.
-        // AgentSession keeps no direct api handle, so reconstruct via provider.
-        // We instead use a one-shot agent-free call through the same closure
-        // used at construction time; AgentSession stores the api implicitly.
-        // To avoid an extra field we call through `self.agent`'s stream_fn by
-        // running a minimal loop with no tools.
-        let _ = context;
-        let stream_fn = self.stream_fn_for_complete()?;
-        let stream = stream_fn(
+        // Route through the shared stream_fn: same api cache and key
+        // injection as the agent loop (no bypass, no missing-key path).
+        let stream = (self.stream_fn.clone())(
             &model,
             &Context {
                 system_prompt: Some(system.to_string()),
@@ -591,19 +580,6 @@ impl AgentSession {
                 Ok(text)
             }
         }
-    }
-
-    fn stream_fn_for_complete(
-        &self,
-    ) -> anyhow::Result<impl Fn(&Model, &Context, &StreamOptions) -> pi_ai::events::AssistantMessageEventStream>
-    {
-        // The Agent holds the stream_fn privately; reuse it via a one-message
-        // loop would persist events. Instead, AgentSession constructs its own
-        // api call from the model's api field through the registry default.
-        let api = crate::model_registry::build_api(&self.model().api).map_err(anyhow::Error::msg)?;
-        Ok(move |model: &Model, context: &Context, options: &StreamOptions| {
-            api.stream(model, context, options.clone())
-        })
     }
 
     /// Branch to an earlier entry, generating a branch summary entry
@@ -700,6 +676,20 @@ impl AgentSession {
         }
         None
     }
+}
+
+/// Dynamic API-key resolution: consulted before every LLM call (pi's
+/// getApiKey contract).
+fn install_api_key_resolver(
+    agent: &Agent,
+    keys: &Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
+) {
+    let keys = keys.clone();
+    agent.set_api_key_resolver(Arc::new(move |provider: &str| {
+        let keys = keys.clone();
+        let provider = provider.to_string();
+        Box::pin(async move { keys.lock().unwrap().get(&provider).cloned() })
+    }));
 }
 
 /// Wire extension before/after tool hooks into the agent's loop config.

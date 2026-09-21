@@ -140,9 +140,14 @@ async fn main() -> anyhow::Result<()> {
                 None,
             ),
         };
+    // models.json apiKeyEnv names an environment variable; resolve it first
+    let custom_key = custom_key_env
+        .as_deref()
+        .and_then(|name| std::env::var(name).ok())
+        .filter(|k| !k.is_empty());
     let api_key = resolve_api_key(
         &provider,
-        api_key_opt.as_deref().or(custom_key_env.as_deref()),
+        api_key_opt.as_deref().or(custom_key.as_deref()),
     )
     .context("no API key found (use --api-key, the provider env var or auth.json)")?;
     let api = build_api(&model.api)

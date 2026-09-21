@@ -233,6 +233,10 @@ pub type StreamFn = Arc<dyn Fn(&Model, &Context, &StreamOptions) -> pi_ai::event
 /// Queue accessor returning steering/follow-up messages.
 pub type MessageQueueFn = Arc<dyn Fn() -> BoxFuture<Vec<AgentMessage>> + Send + Sync>;
 
+/// Resolves an API key dynamically for each LLM call (supports short-lived
+/// tokens that may expire during long-running tool execution).
+pub type ApiKeyResolver = Arc<dyn Fn(&str) -> BoxFuture<Option<String>> + Send + Sync>;
+
 /// Event sink receiving agent events.
 pub type EventSink = Arc<dyn Fn(AgentEvent) -> BoxFuture<()> + Send + Sync>;
 

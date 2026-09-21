@@ -27,6 +27,7 @@ pub struct Agent {
     is_streaming: AtomicBool,
     cancel: Mutex<Option<CancellationToken>>,
     hooks: Mutex<Option<LoopHooks>>,
+    api_key_resolver: Mutex<Option<crate::types::ApiKeyResolver>>,
 }
 
 /// Tool hooks installed on an agent (bridged into the loop config per run).
@@ -112,6 +113,7 @@ impl AgentBuilder {
             is_streaming: AtomicBool::new(false),
             cancel: Mutex::new(None),
             hooks: Mutex::new(None),
+            api_key_resolver: Mutex::new(None),
         }
     }
 }
@@ -177,6 +179,12 @@ impl Agent {
     /// Install tool hooks (bridged into every subsequent run).
     pub fn set_hooks(&self, hooks: LoopHooks) {
         *self.hooks.lock().unwrap() = Some(hooks);
+    }
+
+    /// Install a dynamic API-key resolver, called before every LLM call
+    /// (supports short-lived tokens; pi's getApiKey contract).
+    pub fn set_api_key_resolver(&self, resolver: crate::types::ApiKeyResolver) {
+        *self.api_key_resolver.lock().unwrap() = Some(resolver);
     }
 
     /// Emit a session-level event (e.g. auto-retry notifications).
@@ -271,6 +279,7 @@ impl Agent {
         // struct expression would deadlock (temporary guard lives to the end
         // of the expression).
         let hooks = self.hooks.lock().unwrap().clone();
+        let api_key_resolver = self.api_key_resolver.lock().unwrap().clone();
         let get_steering: MessageQueueFn = {
             let deque = self.steering.clone();
             Arc::new(move || {
@@ -295,7 +304,7 @@ impl Agent {
             stream_fn: self.stream_fn.clone(),
             convert_to_llm: Arc::new(convert_to_llm_default),
             transform_context: None,
-            get_api_key: None,
+            get_api_key: api_key_resolver,
             get_steering_messages: Some(get_steering),
             get_follow_up_messages: Some(get_follow_up),
             should_stop_after_turn: None,
